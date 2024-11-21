@@ -7,7 +7,9 @@ import me.contaria.seedqueue.compat.ModCompat;
 import me.contaria.seedqueue.compat.SeedQueueSettingsCache;
 import me.contaria.seedqueue.compat.WorldPreviewFrameBuffer;
 import me.contaria.seedqueue.compat.WorldPreviewProperties;
+import me.contaria.seedqueue.debug.SeedQueueProfiler;
 import me.contaria.seedqueue.interfaces.SQMinecraftServer;
+import me.contaria.seedqueue.interfaces.SQWorldGenerationProgressTracker;
 import me.contaria.seedqueue.mixin.accessor.MinecraftServerAccessor;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.WorldGenerationProgressTracker;
@@ -24,10 +26,15 @@ public class SeedQueueEntry {
 
     private final LevelStorage.Session session;
     private final MinecraftClient.IntegratedResourceManager resourceManager;
+
+    // will be created lazily when using wall, see MinecraftClientMixin
+    @Nullable
     private final YggdrasilAuthenticationService yggdrasilAuthenticationService;
+    @Nullable
     private final MinecraftSessionService minecraftSessionService;
+    @Nullable
     private final GameProfileRepository gameProfileRepository;
-    @Nullable // UserCache will be null when using wall, see also MinecraftClientMixin#loadUserCache
+    @Nullable
     private final UserCache userCache;
 
     @Nullable
@@ -44,6 +51,7 @@ public class SeedQueueEntry {
     private volatile boolean locked;
     private volatile boolean loaded;
     private volatile boolean discarded;
+    private volatile boolean maxWorldGenerationReached;
 
     /**
      * Stores the position (index) of the queue entry in the wall screen's main group.
@@ -51,7 +59,7 @@ public class SeedQueueEntry {
      */
     public int mainPosition = -1;
 
-    public SeedQueueEntry(MinecraftServer server, LevelStorage.Session session, MinecraftClient.IntegratedResourceManager resourceManager, YggdrasilAuthenticationService yggdrasilAuthenticationService, MinecraftSessionService minecraftSessionService, GameProfileRepository gameProfileRepository, @Nullable UserCache userCache) {
+    public SeedQueueEntry(MinecraftServer server, LevelStorage.Session session, MinecraftClient.IntegratedResourceManager resourceManager, @Nullable YggdrasilAuthenticationService yggdrasilAuthenticationService, @Nullable MinecraftSessionService minecraftSessionService, @Nullable GameProfileRepository gameProfileRepository, @Nullable UserCache userCache) {
         this.server = server;
         this.session = session;
         this.resourceManager = resourceManager;
@@ -75,15 +83,15 @@ public class SeedQueueEntry {
         return this.resourceManager;
     }
 
-    public YggdrasilAuthenticationService getYggdrasilAuthenticationService() {
+    public @Nullable YggdrasilAuthenticationService getYggdrasilAuthenticationService() {
         return this.yggdrasilAuthenticationService;
     }
 
-    public MinecraftSessionService getMinecraftSessionService() {
+    public @Nullable MinecraftSessionService getMinecraftSessionService() {
         return this.minecraftSessionService;
     }
 
-    public GameProfileRepository getGameProfileRepository() {
+    public @Nullable GameProfileRepository getGameProfileRepository() {
         return this.gameProfileRepository;
     }
 
@@ -120,7 +128,7 @@ public class SeedQueueEntry {
         }
         if (create && this.frameBuffer == null) {
             SeedQueueProfiler.push("create_framebuffer");
-            this.frameBuffer = new WorldPreviewFrameBuffer(SeedQueue.config.simulatedWindowSize.width(), SeedQueue.config.simulatedWindowSize.height());
+            this.frameBuffer = new WorldPreviewFrameBuffer();
             SeedQueueProfiler.pop();
         }
         return this.frameBuffer;
@@ -133,14 +141,14 @@ public class SeedQueueEntry {
     /**
      * Deletes and removes this entry's framebuffer.
      *
-     * @see WorldPreviewFrameBuffer#delete
+     * @see WorldPreviewFrameBuffer#discard
      */
     public void discardFrameBuffer() {
         if (!MinecraftClient.getInstance().isOnThread()) {
             throw new RuntimeException("Tried to discard WorldPreviewFrameBuffer off-thread!");
         }
         if (this.frameBuffer != null) {
-            this.frameBuffer.delete();
+            this.frameBuffer.discard();
             this.frameBuffer = null;
         }
     }
@@ -299,6 +307,20 @@ public class SeedQueueEntry {
     }
 
     /**
+     * @return True if the {@link MinecraftServer} has not reached {@link SeedQueueConfig#maxWorldGenerationPercentage}.
+     */
+    public boolean isMaxWorldGenerationReached() {
+        return this.maxWorldGenerationReached;
+    }
+
+    /**
+     * Marks this entry as having reached {@link SeedQueueConfig#maxWorldGenerationPercentage}.
+     */
+    public void setMaxWorldGenerationReached() {
+        this.maxWorldGenerationReached = true;
+    }
+
+    /**
      * Locks this entry from being mass-reset on the Wall Screen.
      * Mass Resets include Reset All, Focus Reset, Reset Row, Reset Column.
      *
@@ -373,5 +395,16 @@ public class SeedQueueEntry {
             this.unpause();
             SeedQueueProfiler.pop();
         }
+    }
+
+    /**
+     * @return The world generation progress percentage for this entry based on an improved calculation in {@link SQWorldGenerationProgressTracker}.
+     */
+    public int getProgressPercentage() {
+        // doubtful this will happen, but the field is @Nullable
+        if (this.worldGenerationProgressTracker == null) {
+            return 0;
+        }
+        return ((SQWorldGenerationProgressTracker) this.worldGenerationProgressTracker).seedQueue$getProgressPercentage();
     }
 }

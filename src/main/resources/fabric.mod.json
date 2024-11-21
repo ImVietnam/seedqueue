@@ -12,6 +12,15 @@
 			}
 		}
 	],
+	"contributors": [
+		"tildejustin",
+		"Crystal",
+		"tesselslate",
+		"sathya",
+		"nealxm",
+		"DuncanRuns",
+		"DesktopFolder"
+	],
 	"contact": {
 		"sources": "https://github.com/KingContaria/seedqueue",
 		"issues": "https://github.com/KingContaria/seedqueue/issues"
@@ -35,17 +44,20 @@
 	"depends": {
 		"fabricloader": ">=0.16.0",
 		"minecraft": "1.16.1",
-		"speedrunapi": "*",
-		"atum": ">=2.0"
+		"speedrunapi": ">=1.1",
+		"atum": ">=2.3"
 	},
 	"breaks": {
-		"worldpreview": "<6.0.0",
+		"worldpreview": "<6.2.0",
 		"antiresourcereload": "<5.0.0",
 		"chunkcacher": "<1.4.0",
 		"standardsettings": "<2.0",
 		"setspawnmod": "<4.0.0",
 		"fast_reset": "<2.0",
 		"state-output": "<1.2",
-		"speedrunigt": "<15.0"
+		"speedrunigt": "<15.0",
+		"sodium": [ "v1", "v2", "<2.0.1" ],
+		"sodiummac": [ "v2", "v3" ],
+		"sleepbackground": "<4.0"
 	}
 }

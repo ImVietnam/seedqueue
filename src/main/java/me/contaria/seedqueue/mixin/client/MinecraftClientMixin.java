@@ -16,8 +16,10 @@ import me.contaria.seedqueue.SeedQueueException;
 import me.contaria.seedqueue.SeedQueueExecutorWrapper;
 import me.contaria.seedqueue.compat.ModCompat;
 import me.contaria.seedqueue.compat.WorldPreviewProperties;
+import me.contaria.seedqueue.debug.SeedQueueSystemInfo;
 import me.contaria.seedqueue.gui.wall.SeedQueueWallScreen;
 import me.contaria.seedqueue.interfaces.SQMinecraftServer;
+import me.contaria.seedqueue.interfaces.SQSoundManager;
 import me.contaria.seedqueue.interfaces.SQWorldGenerationProgressLogger;
 import me.contaria.seedqueue.mixin.accessor.MinecraftServerAccessor;
 import me.contaria.seedqueue.mixin.accessor.PlayerEntityAccessor;
@@ -62,9 +64,6 @@ import java.util.function.Function;
 @Mixin(value = MinecraftClient.class, priority = 500)
 public abstract class MinecraftClientMixin {
 
-    @Shadow
-    @Nullable
-    private IntegratedServer server;
     @Shadow
     @Final
     private AtomicReference<WorldGenerationProgressTracker> worldGenProgressTracker;
@@ -122,7 +121,13 @@ public abstract class MinecraftClientMixin {
     )
     private YggdrasilAuthenticationService loadYggdrasilAuthenticationService(Proxy proxy, String clientToken, Operation<YggdrasilAuthenticationService> original) {
         if (!SeedQueue.inQueue() && SeedQueue.currentEntry != null) {
-            return SeedQueue.currentEntry.getYggdrasilAuthenticationService();
+            YggdrasilAuthenticationService service = SeedQueue.currentEntry.getYggdrasilAuthenticationService();
+            if (service != null) {
+                return service;
+            }
+        }
+        if (SeedQueue.inQueue() && SeedQueue.config.shouldUseWall()) {
+            return null;
         }
         return original.call(proxy, clientToken);
     }
@@ -137,7 +142,13 @@ public abstract class MinecraftClientMixin {
     )
     private MinecraftSessionService loadMinecraftSessionService(YggdrasilAuthenticationService service, Operation<MinecraftSessionService> original) {
         if (!SeedQueue.inQueue() && SeedQueue.currentEntry != null) {
-            return SeedQueue.currentEntry.getMinecraftSessionService();
+            MinecraftSessionService sessionService = SeedQueue.currentEntry.getMinecraftSessionService();
+            if (sessionService != null) {
+                return sessionService;
+            }
+        }
+        if (SeedQueue.inQueue() && service == null) {
+            return null;
         }
         return original.call(service);
     }
@@ -152,7 +163,13 @@ public abstract class MinecraftClientMixin {
     )
     private GameProfileRepository loadGameProfileRepository(YggdrasilAuthenticationService service, Operation<GameProfileRepository> original) {
         if (!SeedQueue.inQueue() && SeedQueue.currentEntry != null) {
-            return SeedQueue.currentEntry.getGameProfileRepository();
+            GameProfileRepository repository = SeedQueue.currentEntry.getGameProfileRepository();
+            if (repository != null) {
+                return repository;
+            }
+        }
+        if (SeedQueue.inQueue() && service == null) {
+            return null;
         }
         return original.call(service);
     }
@@ -171,7 +188,7 @@ public abstract class MinecraftClientMixin {
                 return userCache;
             }
         }
-        if (SeedQueue.inQueue() && SeedQueue.config.shouldUseWall()) {
+        if (SeedQueue.inQueue() && profileRepository == null) {
             // creating the UserCache is quite expensive compared to the rest of the server creation, so we do it lazily (see "loadServer")
             return null;
         }
@@ -185,10 +202,16 @@ public abstract class MinecraftClientMixin {
                     target = "Lnet/minecraft/server/MinecraftServer;startServer(Ljava/util/function/Function;)Lnet/minecraft/server/MinecraftServer;"
             )
     )
-    private MinecraftServer loadServer(Function<Thread, MinecraftServer> serverFactory, Operation<MinecraftServer> original, @Local UserCache userCache) {
+    private MinecraftServer loadServer(Function<Thread, MinecraftServer> serverFactory, Operation<MinecraftServer> original, @Local UserCache userCache, @Local MinecraftSessionService sessionService, @Local GameProfileRepository gameProfileRepo) {
         if (!SeedQueue.inQueue() && SeedQueue.currentEntry != null) {
             // see "loadUserCache"
             MinecraftServer server = SeedQueue.currentEntry.getServer();
+            if (SeedQueue.currentEntry.getMinecraftSessionService() == null) {
+                ((MinecraftServerAccessor) server).seedQueue$setSessionService(sessionService);
+            }
+            if (SeedQueue.currentEntry.getGameProfileRepository() == null) {
+                ((MinecraftServerAccessor) server).seedQueue$setGameProfileRepo(gameProfileRepo);
+            }
             if (SeedQueue.currentEntry.getUserCache() == null) {
                 ((MinecraftServerAccessor) server).seedQueue$setUserCache(userCache);
             }
@@ -228,21 +251,13 @@ public abstract class MinecraftClientMixin {
             )
     )
     private void saveWorldGenerationProgressTracker(AtomicReference<?> instance, Object tracker, Operation<Void> original) {
-        Optional<SeedQueueEntry> entry;
-        Thread currentThread = Thread.currentThread();
-        // in a loop to avoid the probably never happening race condition
-        // where this is called before MinecraftClient#server has been set
-        do {
-            // if the server is set that means we are not in queue and should proceed as normal
-            if (this.server != null && currentThread == this.server.getThread()) {
-                original.call(instance, tracker);
-                return;
-            }
-            entry = SeedQueue.getEntry(currentThread);
-        } while (!entry.isPresent());
-
-        ((SQWorldGenerationProgressLogger) ((WorldGenerationProgressTrackerAccessor) tracker).getProgressLogger()).seedQueue$mute();
-        entry.get().setWorldGenerationProgressTracker((WorldGenerationProgressTracker) tracker);
+        Optional<SeedQueueEntry> entry = SeedQueue.getThreadLocalEntry();
+        if (entry.isPresent()) {
+            ((SQWorldGenerationProgressLogger) ((WorldGenerationProgressTrackerAccessor) tracker).getProgressLogger()).seedQueue$mute();
+            entry.get().setWorldGenerationProgressTracker((WorldGenerationProgressTracker) tracker);
+            return;
+        }
+        original.call(instance, tracker);
     }
 
     @Inject(
@@ -547,6 +562,14 @@ public abstract class MinecraftClientMixin {
     }
 
     @Inject(
+            method = "<init>",
+            at = @At("TAIL")
+    )
+    private void logSystemInformation(CallbackInfo ci) {
+            SeedQueueSystemInfo.logSystemInformation();
+    }
+
+    @Inject(
             method = "run",
             at = @At(
                     value = "INVOKE",
@@ -599,8 +622,10 @@ public abstract class MinecraftClientMixin {
     )
     private void finishRenderingWall(CallbackInfo ci) {
         if (this.currentScreen instanceof SeedQueueWallScreen) {
-            ((SeedQueueWallScreen) this.currentScreen).populateResetCooldowns();
-            ((SeedQueueWallScreen) this.currentScreen).tickBenchmark();
+            SeedQueueWallScreen wall = (SeedQueueWallScreen) this.currentScreen;
+            wall.joinScheduledInstance();
+            wall.populateResetCooldowns();
+            wall.tickBenchmark();
         }
     }
 
@@ -615,26 +640,19 @@ public abstract class MinecraftClientMixin {
         return !SeedQueue.isOnWall();
     }
 
-    // don't clear sounds when coming from the wall screen
-    // ingame sounds of previous worlds will still be reset before joining wall,
-    // this just allows wall sounds to keep playing
-    @WrapWithCondition(
+    @WrapOperation(
             method = "reset",
             at = @At(
                     value = "INVOKE",
                     target = "Lnet/minecraft/client/sound/SoundManager;stopAll()V"
             )
     )
-    private boolean keepSoundsComingFromWall(SoundManager manager) {
-        return !SeedQueue.comingFromWall;
-    }
-
-    @Inject(
-            method = "joinWorld",
-            at = @At("RETURN")
-    )
-    private void resetComingFromWall(CallbackInfo ci) {
-        SeedQueue.comingFromWall = false;
+    private void keepSeedQueueSounds(SoundManager soundManager, Operation<Void> original) {
+        if (SeedQueue.isActive()) {
+            ((SQSoundManager) soundManager).seedQueue$stopAllExceptSeedQueueSounds();
+            return;
+        }
+        original.call(soundManager);
     }
 
     @ModifyReturnValue(
@@ -663,8 +681,7 @@ public abstract class MinecraftClientMixin {
     )
     private static void shutdownQueueOnCrash(CallbackInfo ci) {
         // don't try to stop SeedQueue if Minecraft crashes before the client is initialized
-        // if Minecraft crashes in MinecraftClient#<init>, MinecraftClient#thread can be null
-        if (MinecraftClient.getInstance() == null || !MinecraftClient.getInstance().isOnThread()) {
+        if (MinecraftClient.getInstance() != null && MinecraftClient.getInstance().isOnThread()) {
             SeedQueue.stop();
         }
     }
