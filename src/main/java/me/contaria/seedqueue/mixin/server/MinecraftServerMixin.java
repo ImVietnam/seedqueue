@@ -86,7 +86,12 @@ public abstract class MinecraftServerMixin extends ReentrantThreadExecutor<Serve
         if (SeedQueue.inQueue()) {
             thread.setPriority(SeedQueue.config.serverThreadPriority);
         }
-        thread.setName(thread.getName() + " - " + this.session.getDirectoryName());
+        String name = this.session.getDirectoryName();
+        if (name.startsWith("Random Speedrun #") || name.startsWith("Set Speedrun #")) {
+            thread.setName(thread.getName() + " " + name.substring(name.indexOf('#')));
+        } else {
+            thread.setName(thread.getName() + " - " + name);
+        }
         return thread;
     }
 
@@ -113,13 +118,23 @@ public abstract class MinecraftServerMixin extends ReentrantThreadExecutor<Serve
 
     @Inject(
             method = "setupSpawn",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lnet/minecraft/server/network/SpawnLocating;findServerSpawnPoint(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/util/math/ChunkPos;Z)Lnet/minecraft/util/math/BlockPos;"
-            )
+            at = {
+                    @At(
+                            value = "INVOKE",
+                            target = "Lnet/minecraft/world/biome/source/BiomeSource;locateBiome(IIIILjava/util/List;Ljava/util/Random;)Lnet/minecraft/util/math/BlockPos;"
+                    ),
+                    @At(
+                            value = "INVOKE",
+                            target = "Lnet/minecraft/server/network/SpawnLocating;findServerSpawnPoint(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/util/math/ChunkPos;Z)Lnet/minecraft/util/math/BlockPos;"
+                    )
+            },
+            cancellable = true
     )
-    private static void pauseServerDuringWorldSetup(ServerWorld serverWorld, ServerWorldProperties serverWorldProperties, boolean bl, boolean bl2, boolean bl3, CallbackInfo ci) {
+    private static void pauseOrResetServerDuringWorldSetup(ServerWorld serverWorld, ServerWorldProperties serverWorldProperties, boolean bl, boolean bl2, boolean bl3, CallbackInfo ci) {
         ((SQMinecraftServer) serverWorld.getServer()).seedQueue$tryPausingServer();
+        if (((SQMinecraftServer) serverWorld.getServer()).seedQueue$isDiscarded()) {
+            ci.cancel();
+        }
     }
 
     @Inject(
@@ -138,9 +153,9 @@ public abstract class MinecraftServerMixin extends ReentrantThreadExecutor<Serve
             method = "loadWorld",
             at = @At("TAIL")
     )
-    private void discardWorldPreviewPropertiesOnLoad(CallbackInfo ci) {
+    private void discardPreviewPropertiesOnLoad(CallbackInfo ci) {
         if (!SeedQueue.config.shouldUseWall()) {
-            this.seedQueue$getEntry().ifPresent(entry -> entry.setWorldPreviewProperties(null));
+            this.seedQueue$getEntry().ifPresent(entry -> entry.setPreviewProperties(null));
         }
     }
 
@@ -183,20 +198,21 @@ public abstract class MinecraftServerMixin extends ReentrantThreadExecutor<Serve
 
     @Override
     public boolean seedQueue$shouldPause() {
-        SeedQueueEntry entry = this.seedQueue$getEntry().orElse(null);
-        if (entry == null || entry.isLoaded() || entry.isDiscarded()) {
+        CompletableFuture<SeedQueueEntry> future = this.seedQueueEntry;
+        if (future == null) {
+            return false;
+        }
+        SeedQueueEntry entry = this.seedQueueEntry.join();
+        if (entry.isLoaded() || entry.isDiscarded()) {
             return false;
         }
         if (this.pauseScheduled || entry.isReady()) {
             return true;
         }
-        if (!entry.hasWorldPreview()) {
+        if (!entry.hasWorldPreview() || entry.isLocked()) {
             return false;
         }
-        if (entry.isLocked()) {
-            return false;
-        }
-        if (SeedQueue.config.resumeOnFilledQueue && entry.isMaxWorldGenerationReached() && SeedQueue.isFull() ) {
+        if (SeedQueue.config.resumeOnFilledQueue && entry.isMaxWorldGenerationReached() && SeedQueue.isFull()) {
             return false;
         }
         if (SeedQueue.config.maxWorldGenerationPercentage < 100 && entry.getProgressPercentage() >= SeedQueue.config.maxWorldGenerationPercentage) {
@@ -252,6 +268,11 @@ public abstract class MinecraftServerMixin extends ReentrantThreadExecutor<Serve
             this.notify();
             this.paused = false;
         }
+    }
+
+    @Override
+    public boolean seedQueue$isDiscarded() {
+        return this.seedQueueEntry != null && this.seedQueueEntry.isDone() && this.seedQueueEntry.join().isDiscarded();
     }
 
     @Override

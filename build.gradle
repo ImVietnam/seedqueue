@@ -3,7 +3,7 @@ plugins {
 	id 'maven-publish'
 }
 
-version = project.mod_version
+version = project.mod_version + "+" + project.target_version
 group = project.maven_group
 
 base {
@@ -21,30 +21,30 @@ dependencies {
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
 	// SpeedrunAPI
-	// check for the latest versions at https://jitpack.io/#kingcontaria/speedrunapi
-	modImplementation "com.github.KingContaria:SpeedrunAPI:91a22d5d0e"
-	implementation(annotationProcessor "com.github.bawnorton.mixinsquared:mixinsquared-fabric:0.1.1")
+	// check for the latest versions at https://jitpack.io/#contariaa/speedrunapi
+	modImplementation "com.github.contariaa:SpeedrunAPI:96811e85e8"
+	annotationProcessor "com.github.bawnorton.mixinsquared:mixinsquared-fabric:0.1.1"
 
-	// check for the latest versions at https://jitpack.io/#kingcontaria/atum-rewrite
-	modImplementation ("com.github.KingContaria:atum-rewrite:75ad5523cb") {
+	// check for the latest versions at https://jitpack.io/#contariaa/atum
+	modImplementation ("com.github.contariaa:atum:fe1f979836") {
 		transitive = false
 	}
 
-	// check for the latest versions at https://jitpack.io/#kingcontaria/mcsr-worldpreview-1.16.1
-	modCompileOnly ("com.github.KingContaria:mcsr-worldpreview-1.16.1:6c1253a841") {
+	// check for the latest versions at https://jitpack.io/#contariaa/worldpreview
+	modCompileOnly ("com.github.contariaa:worldpreview:96e37bc1cd") {
 		transitive = false
 	}
 
 	// check for the latest versions at https://jitpack.io/#Minecraft-Java-Edition-Speedrunning/sodium
-	modCompileOnly "com.github.Minecraft-Java-Edition-Speedrunning:sodium:b8785cddfa"
+	modCompileOnly "com.github.Minecraft-Java-Edition-Speedrunning:sodium:0dd4b2d65a"
 
-	// check for the latest versions at https://jitpack.io/#kingcontaria/fastreset
-	modCompileOnly ("com.github.KingContaria:fastreset:82fe8eb3b2") {
+	// check for the latest versions at https://jitpack.io/#contariaa/fastreset
+	modCompileOnly ("com.github.contariaa:fastreset:3e395069aa") {
 		transitive = false
 	}
 
-	// check for the latest versions at https://jitpack.io/#kingcontaria/standardsettings
-	modCompileOnly ("com.github.KingContaria:standardsettings:v2.2") {
+	// check for the latest versions at https://jitpack.io/#contariaa/standardsettings
+	modCompileOnly ("com.github.contariaa:standardsettings:2461224798") {
 		transitive = false
 	}
 
@@ -53,10 +53,10 @@ dependencies {
 }
 
 processResources {
-	inputs.property "version", project.version
+	inputs.property "version", version
 
 	filesMatching("fabric.mod.json") {
-		expand "version": project.version
+		expand "version": version
 	}
 }
 

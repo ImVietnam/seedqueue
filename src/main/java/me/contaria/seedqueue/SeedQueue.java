@@ -6,19 +6,22 @@ import me.contaria.seedqueue.debug.SeedQueueSystemInfo;
 import me.contaria.seedqueue.debug.SeedQueueWatchdog;
 import me.contaria.seedqueue.gui.wall.SeedQueueWallScreen;
 import me.contaria.seedqueue.mixin.accessor.MinecraftClientAccessor;
+import me.contaria.seedqueue.mixin.accessor.MinecraftServerAccessor;
 import me.contaria.seedqueue.sounds.SeedQueueSounds;
+import me.contaria.speedrunapi.util.TextUtil;
 import me.voidxwalker.autoreset.AttemptTracker;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.Version;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.WorldGenerationProgressTracker;
+import net.minecraft.client.gui.screen.ProgressScreen;
 import net.minecraft.client.gui.screen.SaveLevelScreen;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.text.TranslatableText;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
 import java.util.*;
@@ -41,7 +44,6 @@ public class SeedQueue implements ClientModInitializer {
 
     public static final ThreadLocal<SeedQueueEntry> LOCAL_ENTRY = new ThreadLocal<>();
     public static SeedQueueEntry currentEntry;
-    public static SeedQueueEntry selectedEntry;
 
     @Override
     public void onInitializeClient() {
@@ -49,37 +51,62 @@ public class SeedQueue implements ClientModInitializer {
     }
 
     /**
-     * Polls a new {@link SeedQueueEntry} from the queue.
-     * If {@link SeedQueue#selectedEntry} is not null, it will pull that entry from the queue.
+     * Polls a new {@link SeedQueueEntry} from the queue and plays it.
      *
      * @return True if a new {@link SeedQueueEntry} was successfully loaded.
      */
-    public static boolean loadEntry() {
+    public static boolean playEntry() {
         if (!MinecraftClient.getInstance().isOnThread()) {
             throw new RuntimeException("Tried to load a SeedQueueEntry off-thread!");
         }
         synchronized (LOCK) {
-            if (selectedEntry != null) {
-                currentEntry = selectedEntry;
-                if (!SEED_QUEUE.remove(selectedEntry)) {
-                    throw new IllegalStateException("SeedQueue selectedEntry is not part of the queue!");
-                }
-                selectedEntry = null;
-            } else {
-                currentEntry = SEED_QUEUE.poll();
-            }
+            currentEntry = SEED_QUEUE.poll();
+        }
+        if (currentEntry == null) {
+            return false;
         }
         ping();
-        return currentEntry != null;
+        play();
+        return true;
     }
 
     /**
-     * Clears {@link SeedQueue#currentEntry}.
+     * Removes the given {@link SeedQueueEntry} from the queue and plays it.
      */
-    public static void clearCurrentEntry() {
-        synchronized (LOCK) {
-            currentEntry = null;
+    public static void playEntry(@NotNull SeedQueueEntry entry) {
+        if (!MinecraftClient.getInstance().isOnThread()) {
+            throw new RuntimeException("Tried to load a SeedQueueEntry off-thread!");
         }
+        synchronized (LOCK) {
+            if (!SEED_QUEUE.remove(entry)) {
+                throw new IllegalStateException("SeedQueue selectedEntry is not part of the queue!");
+            }
+            currentEntry = entry;
+        }
+        ping();
+        play();
+    }
+
+    /**
+     * Plays the {@link SeedQueue#currentEntry} and sets it back to {@code null} after.
+     */
+    private static void play() {
+        if (!MinecraftClient.getInstance().isOnThread()) {
+            throw new RuntimeException("Tried to play a SeedQueueEntry off-thread!");
+        }
+        if (currentEntry == null) {
+            throw new IllegalStateException("Tried to play a SeedQueueEntry but currentEntry is null!");
+        }
+        // standardsettings can cause the current screen to be re-initialized,
+        // so we open an intermission screen to avoid atum reset logic being called twice
+        MinecraftClient.getInstance().openScreen(new ProgressScreen());
+        MinecraftClient.getInstance().createWorld(
+                currentEntry.getSession().getDirectoryName(),
+                currentEntry.getServer().getSaveProperties().getLevelInfo(),
+                ((MinecraftServerAccessor) currentEntry.getServer()).seedQueue$getDimensionTracker(),
+                currentEntry.getServer().getSaveProperties().getGeneratorOptions()
+        );
+        currentEntry = null;
     }
 
     /**
@@ -95,6 +122,21 @@ public class SeedQueue implements ClientModInitializer {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Traverses the queue in order and returns {@code true} if a {@link SeedQueueEntry} matches the {@link Predicate}.
+     * This method will return after the first match and will not test any further entries.
+     *
+     * @return If a {@link SeedQueueEntry} matches the given predicate.
+     */
+    public static boolean hasEntryMatching(Predicate<SeedQueueEntry> predicate) {
+        for (SeedQueueEntry entry : SEED_QUEUE) {
+            if (predicate.test(entry)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -144,7 +186,7 @@ public class SeedQueue implements ClientModInitializer {
      * @return If all {@link SeedQueueEntry} have reached the {@link SeedQueueConfig#maxWorldGenerationPercentage}.
      */
     public static boolean allMaxWorldGenerationReached() {
-        for (SeedQueueEntry entry: SEED_QUEUE) {
+        for (SeedQueueEntry entry : SEED_QUEUE) {
             if (!entry.isMaxWorldGenerationReached() && !entry.isLocked()) {
                 return false;
             }
@@ -156,7 +198,7 @@ public class SeedQueue implements ClientModInitializer {
      * @return If all currently generating {@link SeedQueueEntry} are not locked.
      */
     public static boolean noLockedRemaining() {
-        for (SeedQueueEntry entry: SEED_QUEUE) {
+        for (SeedQueueEntry entry : SEED_QUEUE) {
             if (entry.isLocked() && !entry.isReady()) {
                 return false;
             }
@@ -180,9 +222,9 @@ public class SeedQueue implements ClientModInitializer {
      * @see SeedQueue#allMaxWorldGenerationReached()
      */
     public static boolean shouldResumeAfterQueueFull() {
-       synchronized (LOCK) {
-           return config.resumeOnFilledQueue && isFull() && allMaxWorldGenerationReached();
-       }
+        synchronized (LOCK) {
+            return config.resumeOnFilledQueue && isFull() && allMaxWorldGenerationReached();
+        }
     }
 
 
@@ -208,14 +250,13 @@ public class SeedQueue implements ClientModInitializer {
      *
      * @param treatScheduledAsPaused If {@link SeedQueueEntry}'s that are scheduled to pause but haven't been paused yet should be added to the count.
      * @return The amount of currently generating / unpaused {@link SeedQueueEntry}'s in queue.
-     *
      * @see SeedQueueConfig#shouldUseWall
      */
     private static long getGeneratingCount(boolean treatScheduledAsPaused) {
         long count = 0;
-        for (SeedQueueEntry entry: SEED_QUEUE) {
+        for (SeedQueueEntry entry : SEED_QUEUE) {
             if (!(entry.isPaused() || (treatScheduledAsPaused && entry.isScheduledToPause()))) {
-                count ++;
+                count++;
             }
         }
 
@@ -229,7 +270,6 @@ public class SeedQueue implements ClientModInitializer {
 
     /**
      * @return The maximum number of {@link SeedQueueEntry}'s that should be generating concurrently.
-     *
      * @see SeedQueueConfig#maxConcurrently
      * @see SeedQueueConfig#maxConcurrently_onWall
      */
@@ -316,14 +356,13 @@ public class SeedQueue implements ClientModInitializer {
         LOGGER.info("Clearing SeedQueue...");
 
         Screen screen = MinecraftClient.getInstance().currentScreen;
-        MinecraftClient.getInstance().setScreenAndRender(new SaveLevelScreen(new TranslatableText("seedqueue.menu.clearing")));
+        MinecraftClient.getInstance().setScreenAndRender(new SaveLevelScreen(TextUtil.translatable("seedqueue.menu.clearing")));
 
         synchronized (LOCK) {
             if (currentEntry != null && !currentEntry.isLoaded()) {
                 currentEntry.discard();
             }
             currentEntry = null;
-            selectedEntry = null;
         }
 
         SEED_QUEUE.forEach(SeedQueueEntry::discard);
